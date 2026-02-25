@@ -154,6 +154,11 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 		}
 	}
 
+	// Context usage
+	if ctx := getContextPercent(statusLineSession); ctx != "" {
+		parts = append(parts, ctx)
+	}
+
 	// Output
 	if len(parts) > 0 {
 		fmt.Print(strings.Join(parts, " | ") + " |")
@@ -380,6 +385,11 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		}
 	}
 
+	// Context usage
+	if ctx := getContextPercent(statusLineSession); ctx != "" {
+		parts = append(parts, ctx)
+	}
+
 	fmt.Print(strings.Join(parts, " | ") + " |")
 	return nil
 }
@@ -449,6 +459,11 @@ func runDeaconStatusLine(t *tmux.Tmux) error {
 		}
 	}
 
+	// Context usage
+	if ctx := getContextPercent(statusLineSession); ctx != "" {
+		parts = append(parts, ctx)
+	}
+
 	fmt.Print(strings.Join(parts, " | ") + " |")
 	return nil
 }
@@ -515,6 +530,11 @@ func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
 				parts = append(parts, fmt.Sprintf("\U0001F4EC %d", unread))
 			}
 		}
+	}
+
+	// Context usage
+	if ctx := getContextPercent(statusLineSession); ctx != "" {
+		parts = append(parts, ctx)
 	}
 
 	fmt.Print(strings.Join(parts, " | ") + " |")
@@ -607,6 +627,11 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 		}
 	}
 
+	// Context usage
+	if ctx := getContextPercent(statusLineSession); ctx != "" {
+		parts = append(parts, ctx)
+	}
+
 	fmt.Print(strings.Join(parts, " | ") + " |")
 	return nil
 }
@@ -686,6 +711,23 @@ func getHookedWork(identity string, maxLen int, beadsDir string) string {
 		display = display[:maxLen-1] + "…"
 	}
 	return display
+}
+
+// getContextPercent reads the context usage percentage from a temp file
+// written by Claude Code's status line hook for the given tmux session.
+func getContextPercent(session string) string {
+	if session == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join("/tmp", fmt.Sprintf("gt-context-%s.pct", session)))
+	if err != nil {
+		return ""
+	}
+	pct := strings.TrimSpace(string(data))
+	if pct == "" || pct == "0" {
+		return ""
+	}
+	return fmt.Sprintf("ctx:%s%%", pct)
 }
 
 // getCurrentWork returns a truncated title of the first in_progress issue assigned to identity.
