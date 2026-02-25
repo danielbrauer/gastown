@@ -727,7 +727,7 @@ func getContextPercent(session string) string {
 	if pct == "" || pct == "0" {
 		return ""
 	}
-	return fmt.Sprintf("ctx:%s%%", pct)
+	return fmt.Sprintf("🧠%s%%", pct)
 }
 
 // getCurrentWork returns a truncated title of the first in_progress issue assigned to identity.
