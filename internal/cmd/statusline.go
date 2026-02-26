@@ -161,7 +161,7 @@ func runWorkerStatusLine(t *tmux.Tmux, session, rigName, polecat, crew, issue st
 
 	// Output
 	if len(parts) > 0 {
-		fmt.Print(strings.Join(parts, " | ") + " |")
+		fmt.Print(strings.Join(parts, " | "))
 	}
 
 	return nil
@@ -390,7 +390,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		parts = append(parts, ctx)
 	}
 
-	fmt.Print(strings.Join(parts, " | ") + " |")
+	fmt.Print(strings.Join(parts, " | "))
 	return nil
 }
 
@@ -464,7 +464,7 @@ func runDeaconStatusLine(t *tmux.Tmux) error {
 		parts = append(parts, ctx)
 	}
 
-	fmt.Print(strings.Join(parts, " | ") + " |")
+	fmt.Print(strings.Join(parts, " | "))
 	return nil
 }
 
@@ -537,7 +537,7 @@ func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
 		parts = append(parts, ctx)
 	}
 
-	fmt.Print(strings.Join(parts, " | ") + " |")
+	fmt.Print(strings.Join(parts, " | "))
 	return nil
 }
 
@@ -552,7 +552,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	}
 
 	if rigName == "" {
-		fmt.Printf("%s ? |", AgentTypeIcons[AgentRefinery])
+		fmt.Printf("%s ?", AgentTypeIcons[AgentRefinery])
 		return nil
 	}
 
@@ -568,7 +568,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	mgr, _, _, err := getRefineryManager(rigName)
 	if err != nil {
 		// Fallback to simple status if we can't access refinery
-		fmt.Printf("%s MQ: ? |", AgentTypeIcons[AgentRefinery])
+		fmt.Printf("%s MQ: ?", AgentTypeIcons[AgentRefinery])
 		return nil
 	}
 
@@ -576,7 +576,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	queue, err := mgr.Queue()
 	if err != nil {
 		// Fallback to simple status if we can't read queue
-		fmt.Printf("%s MQ: ? |", AgentTypeIcons[AgentRefinery])
+		fmt.Printf("%s MQ: ?", AgentTypeIcons[AgentRefinery])
 		return nil
 	}
 
@@ -632,7 +632,7 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 		parts = append(parts, ctx)
 	}
 
-	fmt.Print(strings.Join(parts, " | ") + " |")
+	fmt.Print(strings.Join(parts, " | "))
 	return nil
 }
 
