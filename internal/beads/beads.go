@@ -770,6 +770,9 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 	if opts.Parent != "" {
 		args = append(args, "--parent="+opts.Parent)
 	}
+	if opts.Ephemeral {
+		args = append(args, "--ephemeral")
+	}
 	// Default Actor from BD_ACTOR env var if not specified
 	// Uses getActor() to respect isolated mode (tests)
 	actor := opts.Actor
