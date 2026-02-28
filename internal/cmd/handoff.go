@@ -69,6 +69,7 @@ var (
 	handoffCycle      bool
 	handoffReason     string
 	handoffNoGitCheck bool
+	handoffActivity   string
 )
 
 func init() {
@@ -82,6 +83,7 @@ func init() {
 	handoffCmd.Flags().BoolVar(&handoffCycle, "cycle", false, "Auto-cycle session (for PreCompact hooks that want full session replacement)")
 	handoffCmd.Flags().StringVar(&handoffReason, "reason", "", "Reason for handoff (e.g., 'compaction', 'idle')")
 	handoffCmd.Flags().BoolVar(&handoffNoGitCheck, "no-git-check", false, "Skip git workspace cleanliness check")
+	handoffCmd.Flags().StringVar(&handoffActivity, "activity", "", "Classify session activity for cost tracking (project, development, maintenance)")
 	rootCmd.AddCommand(handoffCmd)
 }
 
@@ -96,6 +98,12 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("reading stdin: %w", err)
 		}
 		handoffMessage = strings.TrimRight(string(data), "\n")
+	}
+
+	// Write activity classification state file for cost tracking.
+	// Written before any early exits so the Stop hook can read it.
+	if handoffActivity != "" {
+		writeActivityStateFile(handoffActivity)
 	}
 
 	// --auto mode: save state only, no session cycling.
@@ -1177,6 +1185,26 @@ func warnHandoffGitStatus() {
 		style.PrintWarning("  %d unpushed commit(s) — run 'git push' before handoff", status.UnpushedCommits)
 	}
 	fmt.Println("  (use --no-git-check to suppress this warning)")
+}
+
+// writeActivityStateFile writes the activity classification to .runtime/session-activity.
+// This is read by `gt costs record` (Stop hook) to tag the cost entry.
+func writeActivityStateFile(activity string) {
+	// Validate
+	switch activity {
+	case "project", "development", "maintenance":
+		// OK
+	default:
+		style.PrintWarning("unknown --activity %q (expected: project, development, maintenance)", activity)
+		return
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	runtimeDir := filepath.Join(cwd, constants.DirRuntime)
+	_ = os.MkdirAll(runtimeDir, 0755)
+	_ = os.WriteFile(filepath.Join(runtimeDir, "session-activity"), []byte(activity), 0644)
 }
 
 // looksLikeBeadID checks if a string looks like a bead ID.

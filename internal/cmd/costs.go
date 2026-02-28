@@ -24,12 +24,13 @@ import (
 )
 
 var (
-	costsJSON    bool
-	costsToday   bool
-	costsWeek    bool
-	costsByRole  bool
-	costsByRig   bool
-	costsVerbose bool
+	costsJSON       bool
+	costsToday      bool
+	costsWeek       bool
+	costsByRole     bool
+	costsByRig      bool
+	costsByActivity bool
+	costsVerbose    bool
 
 	// Record subcommand flags
 	recordSession  string
@@ -55,10 +56,11 @@ by summing token usage from assistant messages and applying model-specific prici
 
 Examples:
   gt costs              # Live costs from running sessions
-  gt costs --today      # Today's costs from log file (not yet digested)
+  gt costs --today      # Today's costs with token counts
   gt costs --week       # This week's costs from digest beads + today's log
   gt costs --by-role    # Breakdown by role (polecat, witness, etc.)
   gt costs --by-rig     # Breakdown by rig
+  gt costs --by-activity # Breakdown by activity (project, orchestration, development, maintenance)
   gt costs --json       # Output as JSON
   gt costs -v           # Show debug output for failures
 
@@ -135,6 +137,7 @@ func init() {
 	costsCmd.Flags().BoolVar(&costsWeek, "week", false, "Show this week's total from session events")
 	costsCmd.Flags().BoolVar(&costsByRole, "by-role", false, "Show breakdown by role")
 	costsCmd.Flags().BoolVar(&costsByRig, "by-rig", false, "Show breakdown by rig")
+	costsCmd.Flags().BoolVar(&costsByActivity, "by-activity", false, "Show breakdown by activity (project, orchestration, development, maintenance)")
 	costsCmd.Flags().BoolVarP(&costsVerbose, "verbose", "v", false, "Show debug output for failures")
 
 	// Add record subcommand
@@ -165,23 +168,29 @@ type SessionCost struct {
 
 // CostEntry is a ledger entry for historical cost tracking.
 type CostEntry struct {
-	SessionID string    `json:"session_id"`
-	Role      string    `json:"role"`
-	Rig       string    `json:"rig,omitempty"`
-	Worker    string    `json:"worker,omitempty"`
-	CostUSD   float64   `json:"cost_usd"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at"`
-	WorkItem  string    `json:"work_item,omitempty"`
+	SessionID    string    `json:"session_id"`
+	Role         string    `json:"role"`
+	Rig          string    `json:"rig,omitempty"`
+	Worker       string    `json:"worker,omitempty"`
+	CostUSD      float64   `json:"cost_usd"`
+	InputTokens  int       `json:"input_tokens"`
+	OutputTokens int       `json:"output_tokens"`
+	Activity     string    `json:"activity,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	EndedAt      time.Time `json:"ended_at"`
+	WorkItem     string    `json:"work_item,omitempty"`
 }
 
 // CostsOutput is the JSON output structure.
 type CostsOutput struct {
-	Sessions []SessionCost      `json:"sessions,omitempty"`
-	Total    float64            `json:"total_usd"`
-	ByRole   map[string]float64 `json:"by_role,omitempty"`
-	ByRig    map[string]float64 `json:"by_rig,omitempty"`
-	Period   string             `json:"period,omitempty"`
+	Sessions     []SessionCost      `json:"sessions,omitempty"`
+	Total        float64            `json:"total_usd"`
+	InputTokens  int                `json:"input_tokens,omitempty"`
+	OutputTokens int                `json:"output_tokens,omitempty"`
+	ByRole       map[string]float64 `json:"by_role,omitempty"`
+	ByRig        map[string]float64 `json:"by_rig,omitempty"`
+	ByActivity   map[string]float64 `json:"by_activity,omitempty"`
+	Period       string             `json:"period,omitempty"`
 }
 
 // costRegex matches cost patterns like "$1.23" or "$12.34"
@@ -239,7 +248,7 @@ var modelPricing = map[string]struct {
 
 func runCosts(cmd *cobra.Command, args []string) error {
 	// If querying ledger, use ledger functions
-	if costsToday || costsWeek || costsByRole || costsByRig {
+	if costsToday || costsWeek || costsByRole || costsByRig || costsByActivity {
 		return runCostsFromLedger()
 	}
 
@@ -278,7 +287,7 @@ func runLiveCosts() error {
 		}
 
 		// Extract cost from Claude transcript
-		cost, err := extractCostFromWorkDir(workDir)
+		cost, _, err := extractCostFromWorkDir(workDir)
 		if err != nil {
 			if costsVerbose {
 				fmt.Fprintf(os.Stderr, "[costs] could not extract cost for %s: %v\n", sess, err)
@@ -339,8 +348,8 @@ func runCostsFromLedger() error {
 		// Also include today's wisps (not yet digested)
 		todayEntries, _ := querySessionCostEntries(now)
 		entries = append(entries, todayEntries...)
-	} else if costsByRole || costsByRig {
-		// When using --by-role or --by-rig without time filter, default to today
+	} else if costsByRole || costsByRig || costsByActivity {
+		// When using --by-role, --by-rig, or --by-activity without time filter, default to today
 		// (querying all historical events would be expensive and likely empty)
 		entries, err = querySessionCostEntries(now)
 		if err != nil {
@@ -359,20 +368,29 @@ func runCostsFromLedger() error {
 
 	// Calculate totals
 	var total float64
+	var totalInput, totalOutput int
 	byRole := make(map[string]float64)
 	byRig := make(map[string]float64)
+	byActivity := make(map[string]float64)
 
 	for _, entry := range entries {
 		total += entry.CostUSD
+		totalInput += entry.InputTokens
+		totalOutput += entry.OutputTokens
 		byRole[entry.Role] += entry.CostUSD
 		if entry.Rig != "" {
 			byRig[entry.Rig] += entry.CostUSD
+		}
+		if entry.Activity != "" {
+			byActivity[entry.Activity] += entry.CostUSD
 		}
 	}
 
 	// Build output
 	output := CostsOutput{
-		Total: total,
+		Total:        total,
+		InputTokens:  totalInput,
+		OutputTokens: totalOutput,
 	}
 
 	if costsByRole {
@@ -380,6 +398,9 @@ func runCostsFromLedger() error {
 	}
 	if costsByRig {
 		output.ByRig = byRig
+	}
+	if costsByActivity {
+		output.ByActivity = byActivity
 	}
 
 	// Set period label
@@ -818,25 +839,25 @@ func calculateCost(usage *TokenUsage) float64 {
 	return inputCost + cacheReadCost + cacheCreateCost + outputCost
 }
 
-// extractCostFromWorkDir extracts cost from Claude Code transcript for a working directory.
+// extractCostFromWorkDir extracts cost and token usage from Claude Code transcript for a working directory.
 // This reads the most recent transcript file and sums all token usage.
-func extractCostFromWorkDir(workDir string) (float64, error) {
+func extractCostFromWorkDir(workDir string) (float64, *TokenUsage, error) {
 	projectDir, err := getClaudeProjectDir(workDir)
 	if err != nil {
-		return 0, fmt.Errorf("getting project dir: %w", err)
+		return 0, nil, fmt.Errorf("getting project dir: %w", err)
 	}
 
 	transcriptPath, err := findLatestTranscript(projectDir)
 	if err != nil {
-		return 0, fmt.Errorf("finding transcript: %w", err)
+		return 0, nil, fmt.Errorf("finding transcript: %w", err)
 	}
 
 	usage, err := parseTranscriptUsage(transcriptPath)
 	if err != nil {
-		return 0, fmt.Errorf("parsing transcript: %w", err)
+		return 0, nil, fmt.Errorf("parsing transcript: %w", err)
 	}
 
-	return calculateCost(usage), nil
+	return calculateCost(usage), usage, nil
 }
 
 // getTmuxSessionWorkDir gets the current working directory of a tmux session.
@@ -907,8 +928,38 @@ func outputLedgerHuman(output CostsOutput, entries []CostEntry) error {
 
 	fmt.Printf("\n%s Cost Summary%s\n\n", style.Bold.Render("📊"), periodStr)
 
-	// Total
-	fmt.Printf("%s $%.2f\n", style.Bold.Render("Total:"), output.Total)
+	// Total with token counts
+	tokenStr := ""
+	if output.InputTokens > 0 || output.OutputTokens > 0 {
+		tokenStr = fmt.Sprintf(" (%s in / %s out)", formatTokenCount(output.InputTokens), formatTokenCount(output.OutputTokens))
+	}
+	fmt.Printf("%s $%.2f%s\n", style.Bold.Render("Total:"), output.Total, tokenStr)
+
+	// By activity breakdown
+	if output.ByActivity != nil && len(output.ByActivity) > 0 {
+		fmt.Printf("\n%s\n", style.Bold.Render("By Activity:"))
+		// Count sessions and tokens per activity
+		activityTokens := make(map[string][2]int) // [input, output]
+		activitySessions := make(map[string]int)
+		for _, e := range entries {
+			if e.Activity != "" {
+				activitySessions[e.Activity]++
+				t := activityTokens[e.Activity]
+				t[0] += e.InputTokens
+				t[1] += e.OutputTokens
+				activityTokens[e.Activity] = t
+			}
+		}
+		for activity, cost := range output.ByActivity {
+			tokens := activityTokens[activity]
+			count := activitySessions[activity]
+			tStr := ""
+			if tokens[0] > 0 || tokens[1] > 0 {
+				tStr = fmt.Sprintf(" (%s in / %s out)", formatTokenCount(tokens[0]), formatTokenCount(tokens[1]))
+			}
+			fmt.Printf("  %-16s $%.2f%s — %d sessions\n", activity, cost, tStr, count)
+		}
+	}
 
 	// By role breakdown
 	if output.ByRole != nil && len(output.ByRole) > 0 {
@@ -933,15 +984,31 @@ func outputLedgerHuman(output CostsOutput, entries []CostEntry) error {
 	return nil
 }
 
+// formatTokenCount formats a token count as a human-readable string (e.g., "2.1M", "340K", "500").
+func formatTokenCount(tokens int) string {
+	if tokens >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
+	}
+	if tokens >= 1_000 {
+		return fmt.Sprintf("%.0fK", float64(tokens)/1_000)
+	}
+	return fmt.Sprintf("%d", tokens)
+}
+
 // CostLogEntry represents a single entry in the costs.jsonl log file.
 type CostLogEntry struct {
-	SessionID string    `json:"session_id"`
-	Role      string    `json:"role"`
-	Rig       string    `json:"rig,omitempty"`
-	Worker    string    `json:"worker,omitempty"`
-	CostUSD   float64   `json:"cost_usd"`
-	EndedAt   time.Time `json:"ended_at"`
-	WorkItem  string    `json:"work_item,omitempty"`
+	SessionID    string    `json:"session_id"`
+	Role         string    `json:"role"`
+	Rig          string    `json:"rig,omitempty"`
+	Worker       string    `json:"worker,omitempty"`
+	CostUSD      float64   `json:"cost_usd"`
+	InputTokens  int       `json:"input_tokens"`
+	OutputTokens int       `json:"output_tokens"`
+	CacheReads   int       `json:"cache_read_tokens,omitempty"`
+	CacheCreates int       `json:"cache_create_tokens,omitempty"`
+	Activity     string    `json:"activity"`
+	EndedAt      time.Time `json:"ended_at"`
+	WorkItem     string    `json:"work_item,omitempty"`
 }
 
 // getCostsLogPath returns the path to the costs log file (~/.gt/costs.jsonl).
@@ -992,11 +1059,12 @@ func runCostsRecord(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Extract cost from Claude transcript
+	// Extract cost and token usage from Claude transcript
 	var cost float64
+	var usage *TokenUsage
 	if workDir != "" {
 		var err error
-		cost, err = extractCostFromWorkDir(workDir)
+		cost, usage, err = extractCostFromWorkDir(workDir)
 		if err != nil {
 			if costsVerbose {
 				fmt.Fprintf(os.Stderr, "[costs] could not extract cost from transcript: %v\n", err)
@@ -1008,6 +1076,12 @@ func runCostsRecord(cmd *cobra.Command, args []string) error {
 	// Parse session name
 	role, rig, worker := parseSessionName(session)
 
+	// Determine activity: check state file first, then auto-derive
+	activity := readActivityStateFile(workDir)
+	if activity == "" {
+		activity = deriveActivity(role, recordWorkItem)
+	}
+
 	// Build log entry
 	entry := CostLogEntry{
 		SessionID: session,
@@ -1015,8 +1089,15 @@ func runCostsRecord(cmd *cobra.Command, args []string) error {
 		Rig:       rig,
 		Worker:    worker,
 		CostUSD:   cost,
+		Activity:  activity,
 		EndedAt:   time.Now(),
 		WorkItem:  recordWorkItem,
+	}
+	if usage != nil {
+		entry.InputTokens = usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+		entry.OutputTokens = usage.OutputTokens
+		entry.CacheReads = usage.CacheReadInputTokens
+		entry.CacheCreates = usage.CacheCreationInputTokens
 	}
 
 	// Marshal to JSON
@@ -1130,14 +1211,55 @@ func detectCurrentTmuxSession() string {
 	return ""
 }
 
+// deriveActivity auto-classifies session activity from role and work item context.
+func deriveActivity(role, workItem string) string {
+	switch role {
+	case constants.RoleWitness, constants.RoleRefinery, constants.RoleMayor, constants.RoleDeacon, "dog":
+		return "orchestration"
+	case constants.RolePolecat:
+		return "project"
+	case constants.RoleCrew:
+		if workItem != "" {
+			return "project"
+		}
+		return "development"
+	default:
+		return "development"
+	}
+}
+
+// readActivityStateFile reads the activity classification from the session state file.
+// Returns empty string if no state file exists (caller should fall back to auto-derivation).
+func readActivityStateFile(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	activityPath := filepath.Join(workDir, constants.DirRuntime, "session-activity")
+	data, err := os.ReadFile(activityPath)
+	if err != nil {
+		return ""
+	}
+	activity := strings.TrimSpace(string(data))
+	// Validate against known activities
+	switch activity {
+	case "project", "orchestration", "development", "maintenance":
+		return activity
+	default:
+		return ""
+	}
+}
+
 // CostDigest represents the aggregated daily cost report.
 type CostDigest struct {
 	Date         string             `json:"date"`
 	TotalUSD     float64            `json:"total_usd"`
+	InputTokens  int                `json:"input_tokens"`
+	OutputTokens int                `json:"output_tokens"`
 	SessionCount int                `json:"session_count"`
 	Sessions     []CostEntry        `json:"sessions,omitempty"`
 	ByRole       map[string]float64 `json:"by_role"`
 	ByRig        map[string]float64 `json:"by_rig,omitempty"`
+	ByActivity   map[string]float64 `json:"by_activity,omitempty"`
 }
 
 // CostDigestPayload is the compact payload stored in the bead.
@@ -1145,9 +1267,12 @@ type CostDigest struct {
 type CostDigestPayload struct {
 	Date         string             `json:"date"`
 	TotalUSD     float64            `json:"total_usd"`
+	InputTokens  int                `json:"input_tokens,omitempty"`
+	OutputTokens int                `json:"output_tokens,omitempty"`
 	SessionCount int                `json:"session_count"`
 	ByRole       map[string]float64 `json:"by_role"`
 	ByRig        map[string]float64 `json:"by_rig,omitempty"`
+	ByActivity   map[string]float64 `json:"by_activity,omitempty"`
 }
 
 // runCostsDigest aggregates session cost entries into a daily digest bead.
@@ -1182,24 +1307,30 @@ func runCostsDigest(cmd *cobra.Command, args []string) error {
 
 	// Build digest
 	digest := CostDigest{
-		Date:     dateStr,
-		Sessions: costEntries,
-		ByRole:   make(map[string]float64),
-		ByRig:    make(map[string]float64),
+		Date:       dateStr,
+		Sessions:   costEntries,
+		ByRole:     make(map[string]float64),
+		ByRig:      make(map[string]float64),
+		ByActivity: make(map[string]float64),
 	}
 
 	for _, e := range costEntries {
 		digest.TotalUSD += e.CostUSD
+		digest.InputTokens += e.InputTokens
+		digest.OutputTokens += e.OutputTokens
 		digest.SessionCount++
 		digest.ByRole[e.Role] += e.CostUSD
 		if e.Rig != "" {
 			digest.ByRig[e.Rig] += e.CostUSD
 		}
+		if e.Activity != "" {
+			digest.ByActivity[e.Activity] += e.CostUSD
+		}
 	}
 
 	if digestDryRun {
 		fmt.Printf("%s [DRY RUN] Would create Cost Report %s:\n", style.Bold.Render("📊"), dateStr)
-		fmt.Printf("  Total: $%.2f\n", digest.TotalUSD)
+		fmt.Printf("  Total: $%.2f (%s in / %s out)\n", digest.TotalUSD, formatTokenCount(digest.InputTokens), formatTokenCount(digest.OutputTokens))
 		fmt.Printf("  Sessions: %d\n", digest.SessionCount)
 		fmt.Printf("  By Role:\n")
 		for role, cost := range digest.ByRole {
@@ -1209,6 +1340,12 @@ func runCostsDigest(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  By Rig:\n")
 			for rig, cost := range digest.ByRig {
 				fmt.Printf("    %s: $%.2f\n", rig, cost)
+			}
+		}
+		if len(digest.ByActivity) > 0 {
+			fmt.Printf("  By Activity:\n")
+			for activity, cost := range digest.ByActivity {
+				fmt.Printf("    %s: $%.2f\n", activity, cost)
 			}
 		}
 		return nil
@@ -1273,13 +1410,16 @@ func querySessionCostEntries(targetDate time.Time) ([]CostEntry, error) {
 		}
 
 		entries = append(entries, CostEntry{
-			SessionID: logEntry.SessionID,
-			Role:      logEntry.Role,
-			Rig:       logEntry.Rig,
-			Worker:    logEntry.Worker,
-			CostUSD:   logEntry.CostUSD,
-			EndedAt:   logEntry.EndedAt,
-			WorkItem:  logEntry.WorkItem,
+			SessionID:    logEntry.SessionID,
+			Role:         logEntry.Role,
+			Rig:          logEntry.Rig,
+			Worker:       logEntry.Worker,
+			CostUSD:      logEntry.CostUSD,
+			InputTokens:  logEntry.InputTokens,
+			OutputTokens: logEntry.OutputTokens,
+			Activity:     logEntry.Activity,
+			EndedAt:      logEntry.EndedAt,
+			WorkItem:     logEntry.WorkItem,
 		})
 	}
 
@@ -1291,7 +1431,9 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 	// Build description with aggregate data
 	var desc strings.Builder
 	desc.WriteString(fmt.Sprintf("Daily cost aggregate for %s.\n\n", digest.Date))
-	desc.WriteString(fmt.Sprintf("**Total:** $%.2f from %d sessions\n\n", digest.TotalUSD, digest.SessionCount))
+	desc.WriteString(fmt.Sprintf("**Total:** $%.2f from %d sessions (%s in / %s out)\n\n",
+		digest.TotalUSD, digest.SessionCount,
+		formatTokenCount(digest.InputTokens), formatTokenCount(digest.OutputTokens)))
 
 	if len(digest.ByRole) > 0 {
 		desc.WriteString("## By Role\n")
@@ -1303,6 +1445,19 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 		for _, role := range roles {
 			icon := constants.RoleEmoji(role)
 			desc.WriteString(fmt.Sprintf("- %s %s: $%.2f\n", icon, role, digest.ByRole[role]))
+		}
+		desc.WriteString("\n")
+	}
+
+	if len(digest.ByActivity) > 0 {
+		desc.WriteString("## By Activity\n")
+		activities := make([]string, 0, len(digest.ByActivity))
+		for activity := range digest.ByActivity {
+			activities = append(activities, activity)
+		}
+		sort.Strings(activities)
+		for _, activity := range activities {
+			desc.WriteString(fmt.Sprintf("- %s: $%.2f\n", activity, digest.ByActivity[activity]))
 		}
 		desc.WriteString("\n")
 	}
@@ -1325,9 +1480,12 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 	compactPayload := CostDigestPayload{
 		Date:         digest.Date,
 		TotalUSD:     digest.TotalUSD,
+		InputTokens:  digest.InputTokens,
+		OutputTokens: digest.OutputTokens,
 		SessionCount: digest.SessionCount,
 		ByRole:       digest.ByRole,
 		ByRig:        digest.ByRig,
+		ByActivity:   digest.ByActivity,
 	}
 	payloadJSON, err := json.Marshal(compactPayload)
 	if err != nil {
