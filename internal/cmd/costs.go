@@ -60,7 +60,7 @@ Examples:
   gt costs --week       # This week's costs from digest beads + today's log
   gt costs --by-role    # Breakdown by role (polecat, witness, etc.)
   gt costs --by-rig     # Breakdown by rig
-  gt costs --by-activity # Breakdown by activity (project, orchestration, development, maintenance)
+  gt costs --by-activity # Breakdown by activity (project merged/unmerged, orchestration, development, maintenance)
   gt costs --json       # Output as JSON
   gt costs -v           # Show debug output for failures
 
@@ -137,7 +137,7 @@ func init() {
 	costsCmd.Flags().BoolVar(&costsWeek, "week", false, "Show this week's total from session events")
 	costsCmd.Flags().BoolVar(&costsByRole, "by-role", false, "Show breakdown by role")
 	costsCmd.Flags().BoolVar(&costsByRig, "by-rig", false, "Show breakdown by rig")
-	costsCmd.Flags().BoolVar(&costsByActivity, "by-activity", false, "Show breakdown by activity (project, orchestration, development, maintenance)")
+	costsCmd.Flags().BoolVar(&costsByActivity, "by-activity", false, "Show breakdown by activity (project merged/unmerged, orchestration, development, maintenance)")
 	costsCmd.Flags().BoolVarP(&costsVerbose, "verbose", "v", false, "Show debug output for failures")
 
 	// Add record subcommand
@@ -364,6 +364,11 @@ func runCostsFromLedger() error {
 	if len(entries) == 0 {
 		fmt.Println(style.Dim.Render("No cost data found. Costs are recorded when sessions end."))
 		return nil
+	}
+
+	// Reclassify "project" → "project (merged)" / "project (unmerged)"
+	if costsByActivity {
+		reclassifyProjectActivity(entries)
 	}
 
 	// Calculate totals
@@ -957,7 +962,7 @@ func outputLedgerHuman(output CostsOutput, entries []CostEntry) error {
 			if tokens[0] > 0 || tokens[1] > 0 {
 				tStr = fmt.Sprintf(" (%s in / %s out)", formatTokenCount(tokens[0]), formatTokenCount(tokens[1]))
 			}
-			fmt.Printf("  %-16s $%.2f%s — %d sessions\n", activity, cost, tStr, count)
+			fmt.Printf("  %-20s $%.2f%s — %d sessions\n", activity, cost, tStr, count)
 		}
 	}
 
@@ -1211,6 +1216,125 @@ func detectCurrentTmuxSession() string {
 	return ""
 }
 
+// lookupMergedWorkItems queries merge-request beads to find which WorkItems were merged.
+// Returns a set of WorkItem IDs that have a closed MR with close_reason="merged".
+func lookupMergedWorkItems(workItems map[string]bool) map[string]bool {
+	if len(workItems) == 0 {
+		return nil
+	}
+
+	// List all merge-request beads (any status)
+	listArgs := []string{
+		"list",
+		"--label=gt:merge-request",
+		"--status=all",
+		"--limit=0",
+		"--json",
+	}
+
+	listCmd := exec.Command("bd", listArgs...)
+	listOutput, err := listCmd.Output()
+	if err != nil {
+		if costsVerbose {
+			fmt.Fprintf(os.Stderr, "[costs] failed to list MR beads: %v\n", err)
+		}
+		return nil
+	}
+
+	var mrList []EventListItem
+	if err := json.Unmarshal(listOutput, &mrList); err != nil {
+		if costsVerbose {
+			fmt.Fprintf(os.Stderr, "[costs] failed to parse MR list: %v\n", err)
+		}
+		return nil
+	}
+
+	if len(mrList) == 0 {
+		return nil
+	}
+
+	// Get full details to parse MR fields
+	showArgs := []string{"show", "--json"}
+	for _, item := range mrList {
+		showArgs = append(showArgs, item.ID)
+	}
+
+	showCmd := exec.Command("bd", showArgs...)
+	showOutput, err := showCmd.Output()
+	if err != nil {
+		if costsVerbose {
+			fmt.Fprintf(os.Stderr, "[costs] failed to show MR beads: %v\n", err)
+		}
+		return nil
+	}
+
+	// Parse as generic issues to extract descriptions
+	var mrIssues []struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(showOutput, &mrIssues); err != nil {
+		if costsVerbose {
+			fmt.Fprintf(os.Stderr, "[costs] failed to parse MR details: %v\n", err)
+		}
+		return nil
+	}
+
+	// Build set of merged WorkItems by parsing MR fields from descriptions
+	merged := make(map[string]bool)
+	for _, mr := range mrIssues {
+		// Parse key: value fields from description
+		var sourceIssue, closeReason string
+		for _, line := range strings.Split(mr.Description, "\n") {
+			line = strings.TrimSpace(line)
+			colonIdx := strings.Index(line, ":")
+			if colonIdx == -1 {
+				continue
+			}
+			key := strings.ToLower(strings.TrimSpace(line[:colonIdx]))
+			value := strings.TrimSpace(line[colonIdx+1:])
+			switch key {
+			case "source_issue", "source-issue", "sourceissue":
+				sourceIssue = value
+			case "close_reason", "close-reason", "closereason":
+				closeReason = value
+			}
+		}
+		if sourceIssue != "" && closeReason == "merged" && workItems[sourceIssue] {
+			merged[sourceIssue] = true
+		}
+	}
+
+	return merged
+}
+
+// reclassifyProjectActivity splits "project" entries into "project (merged)" and
+// "project (unmerged)" by cross-referencing WorkItem IDs with merge-request outcomes.
+func reclassifyProjectActivity(entries []CostEntry) {
+	// Collect unique WorkItems from "project" entries
+	projectWorkItems := make(map[string]bool)
+	for _, e := range entries {
+		if e.Activity == "project" && e.WorkItem != "" {
+			projectWorkItems[e.WorkItem] = true
+		}
+	}
+
+	// Look up which ones were merged
+	mergedItems := lookupMergedWorkItems(projectWorkItems)
+
+	// Reclassify entries
+	for i := range entries {
+		if entries[i].Activity != "project" {
+			continue
+		}
+		if entries[i].WorkItem != "" && mergedItems[entries[i].WorkItem] {
+			entries[i].Activity = "project (merged)"
+		} else {
+			entries[i].Activity = "project (unmerged)"
+		}
+	}
+}
+
 // deriveActivity auto-classifies session activity from role and work item context.
 func deriveActivity(role, workItem string) string {
 	switch role {
@@ -1304,6 +1428,9 @@ func runCostsDigest(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s No session cost entries found for %s\n", style.Dim.Render("○"), dateStr)
 		return nil
 	}
+
+	// Reclassify "project" → "project (merged)" / "project (unmerged)"
+	reclassifyProjectActivity(costEntries)
 
 	// Build digest
 	digest := CostDigest{

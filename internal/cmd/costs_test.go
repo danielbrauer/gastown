@@ -292,3 +292,31 @@ func TestCostDigestPayload_ExcludesSessions(t *testing.T) {
 		t.Errorf("by_role should have 3 entries, got %d", len(asDigest.ByRole))
 	}
 }
+
+func TestReclassifyProjectActivity(t *testing.T) {
+	// Test that reclassification works when lookupMergedWorkItems returns results.
+	// Since lookupMergedWorkItems calls bd CLI which may not be available in tests,
+	// we test the logic by verifying entries with no WorkItem default to "unmerged".
+	entries := []CostEntry{
+		{Activity: "project", WorkItem: ""},
+		{Activity: "orchestration", WorkItem: "gt-abc"},
+		{Activity: "development", WorkItem: ""},
+		{Activity: "project", WorkItem: "gt-xyz"},
+	}
+
+	// Without bd available, all "project" entries become "project (unmerged)"
+	reclassifyProjectActivity(entries)
+
+	if entries[0].Activity != "project (unmerged)" {
+		t.Errorf("entry[0] activity = %q, want %q", entries[0].Activity, "project (unmerged)")
+	}
+	if entries[1].Activity != "orchestration" {
+		t.Errorf("entry[1] activity = %q, want %q (should be unchanged)", entries[1].Activity, "orchestration")
+	}
+	if entries[2].Activity != "development" {
+		t.Errorf("entry[2] activity = %q, want %q (should be unchanged)", entries[2].Activity, "development")
+	}
+	if entries[3].Activity != "project (unmerged)" {
+		t.Errorf("entry[3] activity = %q, want %q", entries[3].Activity, "project (unmerged)")
+	}
+}
