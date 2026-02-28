@@ -174,6 +174,31 @@ func TestDeriveSessionName(t *testing.T) {
 	}
 }
 
+func TestClassifyMode(t *testing.T) {
+	tests := []struct {
+		role     string
+		expected string
+	}{
+		{"crew", "interactive"},
+		{"mayor", "interactive"},
+		{"polecat", "autonomous"},
+		{"witness", "autonomous"},
+		{"refinery", "autonomous"},
+		{"deacon", "autonomous"},
+		{"dog", "autonomous"},
+		{"unknown", "autonomous"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			result := classifyMode(tt.role)
+			if result != tt.expected {
+				t.Errorf("classifyMode(%q) = %q, want %q", tt.role, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestRunCostsRecord_NoSession_ReturnsNil(t *testing.T) {
 	// Clear all session-related env vars so no session can be derived.
 	envKeys := []string{"GT_SESSION", "GT_ROLE", "GT_RIG", "GT_POLECAT", "GT_CREW", "GT_TOWN"}
