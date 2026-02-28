@@ -1009,6 +1009,40 @@ func outputLedgerHuman(output CostsOutput, entries []CostEntry) error {
 		}
 	}
 
+	// By mode breakdown
+	if output.ByMode != nil && len(output.ByMode) > 0 {
+		fmt.Printf("\n%s\n", style.Bold.Render("By Mode:"))
+		// Count sessions and tokens per mode
+		modeTokens := make(map[string][2]int) // [input, output]
+		modeSessions := make(map[string]int)
+		for _, e := range entries {
+			mode := classifyMode(e.Role)
+			modeSessions[mode]++
+			t := modeTokens[mode]
+			t[0] += e.InputTokens
+			t[1] += e.OutputTokens
+			modeTokens[mode] = t
+		}
+		// Show interactive first, then autonomous
+		for _, mode := range []string{"interactive", "autonomous"} {
+			cost, ok := output.ByMode[mode]
+			if !ok {
+				continue
+			}
+			tokens := modeTokens[mode]
+			count := modeSessions[mode]
+			tStr := ""
+			if tokens[0] > 0 || tokens[1] > 0 {
+				tStr = fmt.Sprintf(" (%s in / %s out)", formatTokenCount(tokens[0]), formatTokenCount(tokens[1]))
+			}
+			icon := "👤"
+			if mode == "autonomous" {
+				icon = "🤖"
+			}
+			fmt.Printf("  %s %-14s $%.2f%s — %d sessions\n", icon, mode, cost, tStr, count)
+		}
+	}
+
 	// By role breakdown
 	if output.ByRole != nil && len(output.ByRole) > 0 {
 		fmt.Printf("\n%s\n", style.Bold.Render("By Role:"))
