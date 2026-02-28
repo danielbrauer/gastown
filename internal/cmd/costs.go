@@ -30,6 +30,7 @@ var (
 	costsByRole     bool
 	costsByRig      bool
 	costsByActivity bool
+	costsByMode     bool
 	costsVerbose    bool
 
 	// Record subcommand flags
@@ -61,6 +62,7 @@ Examples:
   gt costs --by-role    # Breakdown by role (polecat, witness, etc.)
   gt costs --by-rig     # Breakdown by rig
   gt costs --by-activity # Breakdown by activity (project, orchestration, development, maintenance)
+  gt costs --by-mode    # Breakdown by mode (interactive vs autonomous)
   gt costs --json       # Output as JSON
   gt costs -v           # Show debug output for failures
 
@@ -138,6 +140,7 @@ func init() {
 	costsCmd.Flags().BoolVar(&costsByRole, "by-role", false, "Show breakdown by role")
 	costsCmd.Flags().BoolVar(&costsByRig, "by-rig", false, "Show breakdown by rig")
 	costsCmd.Flags().BoolVar(&costsByActivity, "by-activity", false, "Show breakdown by activity (project, orchestration, development, maintenance)")
+	costsCmd.Flags().BoolVar(&costsByMode, "by-mode", false, "Show breakdown by mode (interactive vs autonomous)")
 	costsCmd.Flags().BoolVarP(&costsVerbose, "verbose", "v", false, "Show debug output for failures")
 
 	// Add record subcommand
@@ -190,6 +193,7 @@ type CostsOutput struct {
 	ByRole       map[string]float64 `json:"by_role,omitempty"`
 	ByRig        map[string]float64 `json:"by_rig,omitempty"`
 	ByActivity   map[string]float64 `json:"by_activity,omitempty"`
+	ByMode       map[string]float64 `json:"by_mode,omitempty"`
 	Period       string             `json:"period,omitempty"`
 }
 
@@ -248,7 +252,7 @@ var modelPricing = map[string]struct {
 
 func runCosts(cmd *cobra.Command, args []string) error {
 	// If querying ledger, use ledger functions
-	if costsToday || costsWeek || costsByRole || costsByRig || costsByActivity {
+	if costsToday || costsWeek || costsByRole || costsByRig || costsByActivity || costsByMode {
 		return runCostsFromLedger()
 	}
 
@@ -348,7 +352,7 @@ func runCostsFromLedger() error {
 		// Also include today's wisps (not yet digested)
 		todayEntries, _ := querySessionCostEntries(now)
 		entries = append(entries, todayEntries...)
-	} else if costsByRole || costsByRig || costsByActivity {
+	} else if costsByRole || costsByRig || costsByActivity || costsByMode {
 		// When using --by-role, --by-rig, or --by-activity without time filter, default to today
 		// (querying all historical events would be expensive and likely empty)
 		entries, err = querySessionCostEntries(now)
@@ -372,6 +376,7 @@ func runCostsFromLedger() error {
 	byRole := make(map[string]float64)
 	byRig := make(map[string]float64)
 	byActivity := make(map[string]float64)
+	byMode := make(map[string]float64)
 
 	for _, entry := range entries {
 		total += entry.CostUSD
@@ -384,6 +389,7 @@ func runCostsFromLedger() error {
 		if entry.Activity != "" {
 			byActivity[entry.Activity] += entry.CostUSD
 		}
+		byMode[classifyMode(entry.Role)] += entry.CostUSD
 	}
 
 	// Build output
@@ -401,6 +407,9 @@ func runCostsFromLedger() error {
 	}
 	if costsByActivity {
 		output.ByActivity = byActivity
+	}
+	if costsByMode {
+		output.ByMode = byMode
 	}
 
 	// Set period label
@@ -961,6 +970,40 @@ func outputLedgerHuman(output CostsOutput, entries []CostEntry) error {
 		}
 	}
 
+	// By mode breakdown
+	if output.ByMode != nil && len(output.ByMode) > 0 {
+		fmt.Printf("\n%s\n", style.Bold.Render("By Mode:"))
+		// Count sessions and tokens per mode
+		modeTokens := make(map[string][2]int) // [input, output]
+		modeSessions := make(map[string]int)
+		for _, e := range entries {
+			mode := classifyMode(e.Role)
+			modeSessions[mode]++
+			t := modeTokens[mode]
+			t[0] += e.InputTokens
+			t[1] += e.OutputTokens
+			modeTokens[mode] = t
+		}
+		// Show interactive first, then autonomous
+		for _, mode := range []string{"interactive", "autonomous"} {
+			cost, ok := output.ByMode[mode]
+			if !ok {
+				continue
+			}
+			tokens := modeTokens[mode]
+			count := modeSessions[mode]
+			tStr := ""
+			if tokens[0] > 0 || tokens[1] > 0 {
+				tStr = fmt.Sprintf(" (%s in / %s out)", formatTokenCount(tokens[0]), formatTokenCount(tokens[1]))
+			}
+			icon := "👤"
+			if mode == "autonomous" {
+				icon = "🤖"
+			}
+			fmt.Printf("  %s %-14s $%.2f%s — %d sessions\n", icon, mode, cost, tStr, count)
+		}
+	}
+
 	// By role breakdown
 	if output.ByRole != nil && len(output.ByRole) > 0 {
 		fmt.Printf("\n%s\n", style.Bold.Render("By Role:"))
@@ -1228,6 +1271,18 @@ func deriveActivity(role, workItem string) string {
 	}
 }
 
+// classifyMode returns "interactive" or "autonomous" based on the role.
+// Interactive roles (crew, mayor) have a human present.
+// Autonomous roles (polecat, witness, refinery, deacon, dog) run without human interaction.
+func classifyMode(role string) string {
+	switch role {
+	case constants.RoleCrew, constants.RoleMayor:
+		return "interactive"
+	default:
+		return "autonomous"
+	}
+}
+
 // readActivityStateFile reads the activity classification from the session state file.
 // Returns empty string if no state file exists (caller should fall back to auto-derivation).
 func readActivityStateFile(workDir string) string {
@@ -1260,6 +1315,7 @@ type CostDigest struct {
 	ByRole       map[string]float64 `json:"by_role"`
 	ByRig        map[string]float64 `json:"by_rig,omitempty"`
 	ByActivity   map[string]float64 `json:"by_activity,omitempty"`
+	ByMode       map[string]float64 `json:"by_mode,omitempty"`
 }
 
 // CostDigestPayload is the compact payload stored in the bead.
@@ -1273,6 +1329,7 @@ type CostDigestPayload struct {
 	ByRole       map[string]float64 `json:"by_role"`
 	ByRig        map[string]float64 `json:"by_rig,omitempty"`
 	ByActivity   map[string]float64 `json:"by_activity,omitempty"`
+	ByMode       map[string]float64 `json:"by_mode,omitempty"`
 }
 
 // runCostsDigest aggregates session cost entries into a daily digest bead.
@@ -1312,6 +1369,7 @@ func runCostsDigest(cmd *cobra.Command, args []string) error {
 		ByRole:     make(map[string]float64),
 		ByRig:      make(map[string]float64),
 		ByActivity: make(map[string]float64),
+		ByMode:     make(map[string]float64),
 	}
 
 	for _, e := range costEntries {
@@ -1326,6 +1384,7 @@ func runCostsDigest(cmd *cobra.Command, args []string) error {
 		if e.Activity != "" {
 			digest.ByActivity[e.Activity] += e.CostUSD
 		}
+		digest.ByMode[classifyMode(e.Role)] += e.CostUSD
 	}
 
 	if digestDryRun {
@@ -1346,6 +1405,12 @@ func runCostsDigest(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  By Activity:\n")
 			for activity, cost := range digest.ByActivity {
 				fmt.Printf("    %s: $%.2f\n", activity, cost)
+			}
+		}
+		if len(digest.ByMode) > 0 {
+			fmt.Printf("  By Mode:\n")
+			for mode, cost := range digest.ByMode {
+				fmt.Printf("    %s: $%.2f\n", mode, cost)
 			}
 		}
 		return nil
@@ -1462,6 +1527,16 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 		desc.WriteString("\n")
 	}
 
+	if len(digest.ByMode) > 0 {
+		desc.WriteString("## By Mode\n")
+		for _, mode := range []string{"interactive", "autonomous"} {
+			if cost, ok := digest.ByMode[mode]; ok {
+				desc.WriteString(fmt.Sprintf("- %s: $%.2f\n", mode, cost))
+			}
+		}
+		desc.WriteString("\n")
+	}
+
 	if len(digest.ByRig) > 0 {
 		desc.WriteString("## By Rig\n")
 		rigs := make([]string, 0, len(digest.ByRig))
@@ -1486,6 +1561,7 @@ func createCostDigestBead(digest CostDigest) (string, error) {
 		ByRole:       digest.ByRole,
 		ByRig:        digest.ByRig,
 		ByActivity:   digest.ByActivity,
+		ByMode:       digest.ByMode,
 	}
 	payloadJSON, err := json.Marshal(compactPayload)
 	if err != nil {
