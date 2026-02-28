@@ -370,6 +370,14 @@ func runCostsFromLedger() error {
 		return nil
 	}
 
+	// Fill in empty Activity fields by auto-deriving from role.
+	// Entries recorded before the activity feature was added have empty activity.
+	for i := range entries {
+		if entries[i].Activity == "" {
+			entries[i].Activity = deriveActivity(entries[i].Role, entries[i].WorkItem)
+		}
+	}
+
 	// Reclassify "project" → "project (merged)" / "project (unmerged)"
 	if costsByActivity {
 		reclassifyProjectActivity(entries)
